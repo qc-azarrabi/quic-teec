@@ -4,6 +4,9 @@
 #include <time.h>
 #include "tests_private.h"
 
+/* ROOT used in this test. */
+static struct qcomtee_object *root;
+
 static int test_ta_cmd_0(struct qcomtee_object *ta)
 {
 	struct qcomtee_param params[2];
@@ -44,29 +47,71 @@ struct ta {
 	struct qcomtee_object *ta;
 };
 
-static struct ta test_load_ta(struct qcomtee_object *service_object,
+static struct ta test_load_ta(struct qcomtee_object *service_object, int use_mo,
 			      const char *pathname)
 {
 	struct ta ta = { QCOMTEE_OBJECT_NULL, QCOMTEE_OBJECT_NULL };
 	struct qcomtee_param params[2];
 	qcomtee_result_t result;
-
 	char *buffer;
 	size_t size;
-	/* Read the TA file. */
-	if (test_read_file2(pathname, TEST_TA, &buffer, &size))
-		return ta;
+	int ret;
 
-	/* INIT parameters and invoke object: */
-	params[0].attr = QCOMTEE_UBUF_INPUT;
-	params[0].ubuf.addr = buffer;
-	params[0].ubuf.size = size;
-	params[1].attr = QCOMTEE_OBJREF_OUTPUT;
-	/* 0 is IAppLoader_OP_loadFromBuffer. */
-	if (qcomtee_object_invoke(service_object, 0, params, 2, &result) ||
-	    (result != QCOMTEE_OK)) {
-		PRINT("qcomtee_object_invoke.\n");
-		goto failed_out;
+	if (!use_mo) {
+		/* Read the TA file. */
+		size = test_read_file2(pathname, TEST_TA, &buffer, 0);
+		if (!size)
+			return ta;
+
+		/* INIT parameters and invoke object: */
+		params[0].attr = QCOMTEE_UBUF_INPUT;
+		params[0].ubuf.addr = buffer;
+		params[0].ubuf.size = size;
+		params[1].attr = QCOMTEE_OBJREF_OUTPUT;
+		/* 0 is IAppLoader_OP_loadFromBuffer. */
+		ret = qcomtee_object_invoke(service_object, 0, params, 2,
+					    &result);
+
+		/* Free buffer allocated in test_read_file2. */
+		free(buffer);
+
+		if (ret || (result != QCOMTEE_OK)) {
+			PRINT("qcomtee_object_invoke.\n");
+			return ta;
+		}
+	} else {
+		struct qcomtee_object *mo;
+
+		size = test_get_file_size_by_filename(pathname);
+		if (!size)
+			return ta;
+
+		/* Allocate a memory object for the file contents. */
+		if (qcomtee_memory_object_alloc(size, root, &mo))
+			return ta;
+
+		buffer = qcomtee_memory_object_addr(mo);
+		/* Read the TA file. */
+		size = test_read_file2(pathname, TEST_TA, &buffer,
+				       qcomtee_memory_object_size(mo));
+		if (!size)
+			return ta;
+
+		/* INIT parameters and invoke object: */
+		params[0].attr = QCOMTEE_OBJREF_INPUT;
+		params[0].object = mo;
+		params[1].attr = QCOMTEE_OBJREF_OUTPUT;
+		/* 1 is IAppLoader_OP_loadFromRegion. */
+		ret = qcomtee_object_invoke(service_object, 1, params, 2,
+					    &result);
+
+		/* The memoy object donated to QTEE; release it. QTEE releases it's copy. */
+		qcomtee_memory_object_release(mo);
+
+		if (ret || (result != QCOMTEE_OK)) {
+			PRINT("qcomtee_object_invoke.\n");
+			return ta;
+		}
 	}
 
 	ta.ta_controller = params[1].object;
@@ -77,21 +122,18 @@ static struct ta test_load_ta(struct qcomtee_object *service_object,
 	if (qcomtee_object_invoke(ta.ta_controller, 2, params, 1, &result) ||
 	    (result != QCOMTEE_OK)) {
 		PRINT("qcomtee_object_invoke.\n");
-		goto failed_out;
+		return ta;
 	}
 
 	ta.ta = params[0].object;
 
-failed_out:
-	free(buffer);
-
 	return ta;
 }
 
-void test_load_sample_ta(const char *pathname, int cmd)
+void test_load_sample_ta(const char *pathname, int use_mo, int cmd)
 {
 	struct ta test_ta;
-	struct qcomtee_object *root, *client_env_object, *service_object;
+	struct qcomtee_object *client_env_object, *service_object;
 
 	/* Get root + supplicant. */
 	root = test_get_root();
@@ -114,7 +156,7 @@ void test_load_sample_ta(const char *pathname, int cmd)
 	}
 
 	/* Load the TA. */
-	test_ta = test_load_ta(service_object, pathname);
+	test_ta = test_load_ta(service_object, use_mo, pathname);
 	if (test_ta.ta == QCOMTEE_OBJECT_NULL) {
 		PRINT("test_load_ta.\n");
 		goto dec_service_object;
